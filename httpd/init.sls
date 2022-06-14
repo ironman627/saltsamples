@@ -1,6 +1,4 @@
 # Lab Chap. 7 - /srv/salt/httpd/init.sls
-include:
-  - apachetop
 
 install_httpd:
   pkg.installed:
