@@ -1,0 +1,4 @@
+# /srv/salt/redis/map.yaml
+port: 6379
+bind: 0.0.0.0
+dir: /var/lib/redis/
