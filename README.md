@@ -1,2 +1,2 @@
 # saltsamples
-Branch for staging state file code.
+This repository is for housing sample Salt State files.
