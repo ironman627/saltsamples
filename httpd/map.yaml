@@ -1,0 +1,10 @@
+# Lab Ch. 8 - map files
+# For apache install
+Debian:
+   name: apache2
+   httpfile: /etc/apache2/apache2.conf
+   source_httpfile: salt://httpd/files/apache2.conf
+RedHat:
+   name: httpd
+   httpfile: /etc/httpd/conf/httpd.conf
+   source_httpfile: salt://httpd/files/httpd.conf

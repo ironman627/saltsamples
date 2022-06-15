@@ -1,19 +1,21 @@
-# Lab Chap. 7 - /srv/salt/httpd/init.sls
+# Lab Chap. 8 - /srv/salt/httpd/init.sls
+{% import_yaml 'httpd/map.yaml' as osmap %}
+{% set apache = salt['grains.filter_by'](osmap) %}
 
 install_httpd:
   pkg.installed:
-    - name: httpd
+    - name: {{ apache.name }}
 
 configure_httpd:
   file.managed:
-    - name: /etc/httpd/conf/httpd.conf
-    - source: salt://httpd/files/httpd.conf
+    - name: {{ apache.httpfile }}
+    - source: {{ apache.source_httpfile }}
+    - template: jinja
+    - require:
+      - pkg: install_httpd
 
 start_httpd:
   service.running:
-    - name: httpd
-    - enable: True
-    - require:
-      - pkg: install_httpd
+    - name: {{ apache.name }}
     - watch:
       - file: configure_httpd
