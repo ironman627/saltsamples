@@ -1,2 +1,2 @@
 # saltsamples
-Repo that contains sample state files.
+Branch for staging state file code.
