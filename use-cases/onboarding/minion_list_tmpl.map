@@ -1,0 +1,6 @@
+# list of host names 
+minions:
+    {{hostname}}:
+      user: user1
+      password: password1
+      ip_address: {{ipaddress}}

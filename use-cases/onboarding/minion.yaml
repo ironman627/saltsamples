@@ -1,0 +1,8 @@
+cent7-minion:
+  user: user1
+  password: password1
+  ip_address: 192.168.0.34
+win2016:
+  user: user2
+  password: password2
+  ip_address: 192.168.0.38

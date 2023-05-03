@@ -1,0 +1,26 @@
+# list of host names 
+minions:
+    cent7-minion:
+      user: user1
+      password: password1
+      ip_address: 192.168.0.34
+    win2016:
+      user: user2
+      password: password2
+      ip_address: 192.168.0.38
+    photon3-minion:
+      user: user1
+      password: password1
+      ip_address: 192.168.0.101
+    win2019:
+      user: user2
+      password: password2
+      ip_address: 192.168.0.13
+    ubuntu20:
+      user: user1
+      password: password1
+      ip_address: 192.168.0.50
+    win2022:
+      user: user2
+      password: password2
+      ip_address: 192.168.0.103
