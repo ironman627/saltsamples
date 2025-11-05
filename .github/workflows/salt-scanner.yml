@@ -142,10 +142,11 @@ jobs:
                 files_with_issues = 0
                 
                 for file_path in salt_files:
-                    # Skip test files and backup files
-                    if ('test' in str(file_path).lower() or 
-                        str(file_path).endswith('.backup') or
-                        '/.git/' in str(file_path)):
+                    # Skip backup files and git directory
+                    if (str(file_path).endswith('.backup') or 
+                        str(file_path).endswith('.bak') or
+                        '/.git/' in str(file_path) or
+                        '\\.git\\' in str(file_path)):
                         continue
                     
                     file_result = self.scan_file(file_path)
