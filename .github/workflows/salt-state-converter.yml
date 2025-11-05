@@ -528,8 +528,8 @@ jobs:
         git commit -F /tmp/commit_msg
         
         COMMIT_HASH=$(git rev-parse HEAD)
-        echo "::set-output name=commit_hash::$COMMIT_HASH"
-        echo "::set-output name=committed::true"
+        echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+        echo "committed=true" >> $GITHUB_OUTPUT
         
         echo "Changes committed: $COMMIT_HASH"
     
