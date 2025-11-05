@@ -1,5 +1,14 @@
 name: Salt State Converter
 
+# SETUP REQUIRED: To enable approval requirements for automatic conversions:
+# 1. Go to Settings > Environments in your GitHub repository
+# 2. Create a new environment named "salt-conversion-approval"
+# 3. Under "Deployment protection rules", check "Required reviewers"
+# 4. Add the admin(s) who should approve conversions
+# 5. (Optional) Set a wait timer before auto-approval
+# 
+# This ensures no automatic conversions happen without admin approval.
+
 on:
   workflow_dispatch:
     inputs:
@@ -57,7 +66,7 @@ env:
 jobs:
   analyze:
     runs-on: ubuntu-latest
-    if: github.event.inputs.action == 'analyze' || github.event_name == 'pull_request'
+    if: github.event.inputs.action == 'analyze' || github.event_name == 'pull_request' || github.event_name == 'push'
     outputs:
       needs_conversion: ${{ steps.analysis.outputs.needs_conversion }}
       salt_files_count: ${{ steps.analysis.outputs.salt_files_count }}
@@ -249,11 +258,21 @@ jobs:
   convert:
     runs-on: ubuntu-latest
     needs: analyze
+    # Use an environment to require approval before running conversion
+    environment: 
+      name: salt-conversion-approval
+      url: ${{ steps.branch.outputs.branch_url }}
     if: |
       (github.event.inputs.action == 'convert' && github.event.inputs.action != 'batch') ||
       (github.event_name == 'push' && needs.analyze.outputs.needs_conversion == 'true')
     
     steps:
+    - name: Notify - Awaiting Approval
+      run: |
+        echo "⏸️ This workflow requires admin approval before converting Salt states."
+        echo "📊 Files needing conversion: ${{ needs.analyze.outputs.conversion_candidates }}"
+        echo "📝 An admin must approve this workflow run in the Actions tab."
+    
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
@@ -295,6 +314,10 @@ jobs:
         
         echo "::set-output name=branch_name::$BRANCH_NAME"
         echo "CONVERSION_BRANCH=$BRANCH_NAME" >> $GITHUB_ENV
+        
+        # Set branch URL for environment
+        BRANCH_URL="https://github.com/${{ github.repository }}/tree/${BRANCH_NAME}"
+        echo "::set-output name=branch_url::$BRANCH_URL"
     
     - name: Run Salt State Conversion
       id: conversion
