@@ -453,11 +453,14 @@ jobs:
         print(f"  Test files skipped: {results['test_skipped']}")
         print(f"  Errors: {results['errors']}")
         
-        # Set outputs
-        print(f"::set-output name=converted_count::{results['converted']}")
-        print(f"::set-output name=skipped_count::{results['skipped']}")
-        print(f"::set-output name=test_skipped_count::{results['test_skipped']}")
-        print(f"::set-output name=error_count::{results['errors']}")
+        # Set outputs using environment file
+        github_output = os.environ.get('GITHUB_OUTPUT')
+        if github_output:
+            with open(github_output, 'a') as f:
+                f.write(f"converted_count={results['converted']}\n")
+                f.write(f"skipped_count={results['skipped']}\n")
+                f.write(f"test_skipped_count={results['test_skipped']}\n")
+                f.write(f"error_count={results['errors']}\n")
         
         # Save conversion report
         conversion_report = {
