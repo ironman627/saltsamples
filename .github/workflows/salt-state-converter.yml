@@ -352,8 +352,8 @@ jobs:
                     with open(file_path, 'r', encoding='utf-8') as f:
                         content = f.read()
                     
-                    # Skip test files
-                    if 'test' in str(file_path).lower():
+                    # Skip files in /test/ or /tests/ directories
+                    if re.search(r'([\\/](test|tests)[\\/])', str(file_path), re.IGNORECASE):
                         self.test_skipped_count += 1
                         return False
                     
