@@ -295,7 +295,7 @@ jobs:
         echo "Creating conversion branch: $BRANCH_NAME"
         git checkout -b "$BRANCH_NAME"
         
-        echo "::set-output name=branch_name::$BRANCH_NAME"
+        echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
         echo "CONVERSION_BRANCH=$BRANCH_NAME" >> $GITHUB_ENV
     
     - name: Run Salt State Conversion
