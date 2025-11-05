@@ -143,9 +143,11 @@ jobs:
                 
                 for file_path in salt_files:
                     # Skip test files and backup files
-                    if ('test' in str(file_path).lower() or 
-                        str(file_path).endswith('.backup') or
-                        '/.git/' in str(file_path)):
+                    file_path_str = str(file_path).replace("\\", "/").lower()
+                    path_parts = file_path_str.split('/')
+                    if ('test' in path_parts or 'tests' in path_parts or
+                        file_path_str.endswith('.backup') or
+                        '/.git/' in file_path_str):
                         continue
                     
                     file_result = self.scan_file(file_path)
