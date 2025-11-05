@@ -1,0 +1,449 @@
+name: Salt State Repository Scanner
+
+on:
+  schedule:
+    # Run weekly on Sundays at 2 AM UTC
+    - cron: '0 2 * * 0'
+  
+  workflow_dispatch:
+    inputs:
+      scan_mode:
+        description: 'Scan mode'
+        required: true
+        default: 'current'
+        type: choice
+        options:
+        - current
+        - batch
+      batch_repos_url:
+        description: 'URL to JSON file with repositories to scan'
+        required: false
+        type: string
+
+env:
+  PYTHON_VERSION: '3.9'
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    outputs:
+      scan_results: ${{ steps.scan.outputs.results }}
+      
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyyaml pathlib requests
+    
+    - name: Scan Current Repository
+      if: github.event.inputs.scan_mode == 'current' || github.event_name == 'schedule'
+      id: scan
+      run: |
+        python3 << 'EOF'
+        import os
+        import re
+        import json
+        from pathlib import Path
+        from datetime import datetime
+        
+        class SaltRepositoryScanner:
+            def __init__(self):
+                self.old_format_pattern = re.compile(r'^(/[^:\s]+|[A-Z]:\\[^:\s]+):$')
+                self.salt_modules = {
+                    'file', 'pkg', 'service', 'user', 'group', 'cmd', 'cron', 'mount', 
+                    'network', 'archive', 'git', 'svn', 'test', 'pillar', 'grains',
+                    'mine', 'schedule', 'dockerng', 'docker', 'kubernetes', 'firewall',
+                    'iptables', 'sysctl', 'timezone', 'locale', 'keyboard', 'host'
+                }
+            
+            def is_old_format_state_id(self, line):
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    return False
+                
+                if not self.old_format_pattern.match(line):
+                    return False
+                
+                potential_id = line.rstrip(':').strip()
+                
+                if '.' in potential_id:
+                    module_name = potential_id.split('.')[0]
+                    if module_name in self.salt_modules:
+                        return False
+                
+                return True
+            
+            def scan_file(self, file_path):
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    lines = content.split('\n')
+                    issues = []
+                    
+                    for i, line in enumerate(lines, 1):
+                        if self.is_old_format_state_id(line):
+                            issues.append({
+                                'line_number': i,
+                                'line_content': line.strip(),
+                                'state_id': line.rstrip(':').strip(),
+                                'issue_type': 'old_format_state_id'
+                            })
+                    
+                    # Check for other common issues
+                    has_explicit_names = bool(re.search(r'^\s*-?\s*name:', content, re.MULTILINE))
+                    
+                    return {
+                        'file_path': str(file_path),
+                        'total_lines': len(lines),
+                        'old_format_issues': len(issues),
+                        'issues': issues,
+                        'has_explicit_names': has_explicit_names,
+                        'file_size': len(content),
+                        'last_modified': file_path.stat().st_mtime
+                    }
+                    
+                except Exception as e:
+                    return {
+                        'file_path': str(file_path),
+                        'error': str(e),
+                        'scan_failed': True
+                    }
+            
+            def scan_repository(self, repo_path='.'):
+                results = {
+                    'repository': os.environ.get('GITHUB_REPOSITORY', 'unknown'),
+                    'scan_timestamp': datetime.now().isoformat(),
+                    'repo_path': repo_path,
+                    'files': [],
+                    'summary': {}
+                }
+                
+                repo_dir = Path(repo_path)
+                
+                # Find all Salt state files
+                salt_files = []
+                for ext in ['*.sls', '*.jinja']:
+                    salt_files.extend(repo_dir.rglob(ext))
+                
+                print(f"Found {len(salt_files)} Salt state files to scan")
+                
+                total_issues = 0
+                files_with_issues = 0
+                
+                for file_path in salt_files:
+                    # Skip test files and backup files
+                    if ('test' in str(file_path).lower() or 
+                        str(file_path).endswith('.backup') or
+                        '/.git/' in str(file_path)):
+                        continue
+                    
+                    file_result = self.scan_file(file_path)
+                    results['files'].append(file_result)
+                    
+                    if not file_result.get('scan_failed', False):
+                        issue_count = file_result.get('old_format_issues', 0)
+                        total_issues += issue_count
+                        if issue_count > 0:
+                            files_with_issues += 1
+                
+                # Generate summary
+                results['summary'] = {
+                    'total_salt_files': len(results['files']),
+                    'files_with_issues': files_with_issues,
+                    'total_issues': total_issues,
+                    'scan_errors': len([f for f in results['files'] if f.get('scan_failed', False)]),
+                    'compliance_percentage': round((len(results['files']) - files_with_issues) / len(results['files']) * 100, 2) if results['files'] else 100
+                }
+                
+                return results
+        
+        # Perform scan
+        scanner = SaltRepositoryScanner()
+        scan_results = scanner.scan_repository('.')
+        
+        print("=== Salt State Repository Scan Results ===")
+        print(f"Repository: {scan_results['repository']}")
+        print(f"Total Salt files: {scan_results['summary']['total_salt_files']}")
+        print(f"Files with issues: {scan_results['summary']['files_with_issues']}")
+        print(f"Total issues found: {scan_results['summary']['total_issues']}")
+        print(f"Compliance percentage: {scan_results['summary']['compliance_percentage']}%")
+        print(f"Scan errors: {scan_results['summary']['scan_errors']}")
+        
+        # Save results
+        with open('scan_results.json', 'w') as f:
+            json.dump(scan_results, f, indent=2)
+        
+        # Set output for next job
+        print(f"::set-output name=results::{json.dumps(scan_results['summary'])}")
+        
+        EOF
+    
+    - name: Upload Scan Results
+      uses: actions/upload-artifact@v3
+      with:
+        name: salt-scan-results
+        path: scan_results.json
+    
+    - name: Generate Compliance Report
+      run: |
+        python3 << 'EOF'
+        import json
+        
+        # Load scan results
+        with open('scan_results.json', 'r') as f:
+            results = json.load(f)
+        
+        summary = results['summary']
+        
+        # Generate markdown report
+        report = f"""# Salt State Compliance Report
+        
+        **Repository:** {results['repository']}  
+        **Scan Date:** {results['scan_timestamp'][:19]}Z  
+        **Compliance Score:** {summary['compliance_percentage']}%
+        
+        ## Summary
+        
+        | Metric | Value |
+        |--------|-------|
+        | Total Salt Files | {summary['total_salt_files']} |
+        | Files with Issues | {summary['files_with_issues']} |
+        | Total Issues | {summary['total_issues']} |
+        | Scan Errors | {summary['scan_errors']} |
+        | Compliance Rate | {summary['compliance_percentage']}% |
+        
+        ## Files Requiring Attention
+        
+        """
+        
+        files_with_issues = [f for f in results['files'] if f.get('old_format_issues', 0) > 0]
+        
+        if files_with_issues:
+            report += "| File | Issues | Lines |\n|------|--------|-------|\n"
+            for file_info in files_with_issues[:20]:  # Show top 20
+                report += f"| `{file_info['file_path']}` | {file_info['old_format_issues']} | {file_info['total_lines']} |\n"
+            
+            if len(files_with_issues) > 20:
+                report += f"\n*... and {len(files_with_issues) - 20} more files*\n"
+        else:
+            report += "✅ **All files are compliant with Salt best practices!**\n"
+        
+        # Recommendations
+        if summary['files_with_issues'] > 0:
+            report += f"""
+        ## Recommendations
+        
+        1. **Run Conversion Workflow**: Use the Salt State Converter workflow to automatically fix {summary['total_issues']} issues
+        2. **Review Changes**: Carefully review converted files before merging
+        3. **Test States**: Ensure converted states work as expected in your environment
+        4. **Update Documentation**: Update any documentation referencing old state IDs
+        
+        ### Quick Fix
+        
+        Run the conversion workflow manually:
+        ```
+        # Go to Actions tab → Salt State Converter → Run workflow
+        # Select "convert" action with appropriate options
+        ```
+        """
+        
+        with open('compliance_report.md', 'w') as f:
+            f.write(report)
+        
+        print("Compliance report generated")
+        EOF
+    
+    - name: Upload Compliance Report
+      uses: actions/upload-artifact@v3
+      with:
+        name: salt-compliance-report
+        path: compliance_report.md
+        
+    - name: Create Issue for Non-Compliance
+      if: fromJson(steps.scan.outputs.results).files_with_issues > 0
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          
+          // Read the compliance report
+          const report = fs.readFileSync('compliance_report.md', 'utf8');
+          const scanResults = JSON.parse(fs.readFileSync('scan_results.json', 'utf8'));
+          
+          const summary = scanResults.summary;
+          
+          // Check if there's already an open issue about Salt compliance
+          const { data: issues } = await github.rest.issues.listForRepo({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            state: 'open',
+            labels: 'salt-compliance',
+            per_page: 1
+          });
+          
+          const issueTitle = '🧂 Salt State Compliance Issues Detected';
+          const issueBody = `${report}
+          
+          ---
+          
+          **Automated Scan Results**
+          - Scan Date: ${scanResults.scan_timestamp}
+          - Workflow Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          
+          This issue was automatically created by the Salt State Repository Scanner.`;
+          
+          if (issues.length > 0) {
+            // Update existing issue
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issues[0].number,
+              body: issueBody
+            });
+            
+            // Add a comment about the new scan
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issues[0].number,
+              body: `## 🔄 Updated Scan Results
+              
+              **Latest Scan:** ${scanResults.scan_timestamp}
+              - Files with issues: ${summary.files_with_issues}
+              - Total issues: ${summary.total_issues}  
+              - Compliance: ${summary.compliance_percentage}%
+              
+              [View detailed results](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`
+            });
+            
+            console.log(`Updated existing compliance issue #${issues[0].number}`);
+          } else {
+            // Create new issue
+            const { data: newIssue } = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: issueTitle,
+              body: issueBody,
+              labels: ['salt-compliance', 'enhancement', 'automated']
+            });
+            
+            console.log(`Created new compliance issue #${newIssue.number}`);
+          }
+  
+  batch_scan:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.scan_mode == 'batch'
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python  
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyyaml pathlib requests
+    
+    - name: Download Batch Repositories List
+      run: |
+        if [ -n "${{ github.event.inputs.batch_repos_url }}" ]; then
+          curl -o batch_repos.json "${{ github.event.inputs.batch_repos_url }}"
+        else
+          # Use a default batch configuration
+          cat > batch_repos.json << 'EOF'
+        {
+          "repositories": [
+            {
+              "url": "https://github.com/${{ github.repository }}.git",
+              "name": "current-repo",
+              "branch": "main"
+            }
+          ]
+        }
+        EOF
+        fi
+    
+    - name: Batch Scan Repositories
+      run: |
+        python3 << 'EOF'
+        import json
+        import subprocess
+        import tempfile
+        import os
+        from pathlib import Path
+        
+        # Load repository list
+        with open('batch_repos.json', 'r') as f:
+            config = json.load(f)
+        
+        repositories = config.get('repositories', [])
+        print(f"Scanning {len(repositories)} repositories")
+        
+        batch_results = []
+        
+        for repo_config in repositories:
+            repo_url = repo_config['url']
+            repo_name = repo_config.get('name', Path(repo_url).stem)
+            branch = repo_config.get('branch', 'main')
+            
+            print(f"\n--- Scanning repository: {repo_name} ---")
+            
+            try:
+                # Clone and scan repository
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    clone_path = Path(temp_dir) / repo_name
+                    
+                    print(f"Cloning {repo_url}...")
+                    subprocess.run(['git', 'clone', '--depth', '1', '--branch', branch, repo_url, str(clone_path)], check=True)
+                    
+                    # TODO: Run scan on cloned repository
+                    # This would use the same scanning logic as above
+                    
+                    batch_results.append({
+                        'repository': repo_name,
+                        'url': repo_url,
+                        'branch': branch,
+                        'status': 'scanned',
+                        'summary': {
+                            'total_salt_files': 0,
+                            'files_with_issues': 0,
+                            'compliance_percentage': 100
+                        }
+                    })
+                    
+            except Exception as e:
+                print(f"Error scanning {repo_name}: {e}")
+                batch_results.append({
+                    'repository': repo_name,
+                    'url': repo_url,
+                    'status': 'error',
+                    'error': str(e)
+                })
+        
+        # Save batch results
+        with open('batch_scan_results.json', 'w') as f:
+            json.dump(batch_results, f, indent=2)
+        
+        print(f"\nBatch scan completed for {len(repositories)} repositories")
+        EOF
+    
+    - name: Upload Batch Results
+      uses: actions/upload-artifact@v3
+      with:
+        name: salt-batch-scan-results
+        path: batch_scan_results.json

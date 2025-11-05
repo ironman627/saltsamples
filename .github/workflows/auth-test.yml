@@ -1,0 +1,215 @@
+name: Salt Converter - Auth Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: 'Authentication test mode'
+        required: true
+        default: 'current'
+        type: choice
+        options:
+        - current
+        - external_repo
+      external_repo_url:
+        description: 'External repository URL to test (for external_repo mode)'
+        required: false
+        type: string
+
+env:
+  PYTHON_VERSION: '3.9'
+
+jobs:
+  auth_test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Set up Git Configuration
+      run: |
+        git config --global user.name 'GitHub Actions Bot'
+        git config --global user.email 'actions@github.com'
+    
+    - name: Test Current Repository Access
+      if: github.event.inputs.test_mode == 'current' || github.event.inputs.test_mode == ''
+      run: |
+        echo "=== Current Repository Authentication Test ==="
+        echo "Repository: $GITHUB_REPOSITORY"
+        echo "Actor: $GITHUB_ACTOR"
+        echo "Token available: $([[ -n \"$GITHUB_TOKEN\" ]] && echo 'Yes' || echo 'No')"
+        echo ""
+        
+        echo "--- Git Remote Configuration ---"
+        git remote -v
+        echo ""
+        
+        echo "--- Testing Remote Access ---"
+        if git ls-remote origin HEAD >/dev/null 2>&1; then
+          echo "✅ Remote read access: WORKING"
+        else
+          echo "❌ Remote read access: FAILED"
+          exit 1
+        fi
+        
+        echo "--- Testing Branch Creation ---"
+        TEST_BRANCH="auth-test-$(date +%Y%m%d_%H%M%S)"
+        git checkout -b "$TEST_BRANCH"
+        echo "✅ Branch creation: WORKING ($TEST_BRANCH)"
+        
+        echo "--- Testing File Modification ---"
+        echo "# Auth Test $(date)" > auth_test.tmp
+        git add auth_test.tmp
+        git commit -m "Auth test commit - $(date)"
+        echo "✅ Local commit: WORKING"
+        
+        echo "--- Testing Push Access ---"
+        if git push origin "$TEST_BRANCH" 2>&1; then
+          echo "✅ Push access: WORKING"
+          
+          # Clean up test branch
+          git push origin --delete "$TEST_BRANCH" 2>/dev/null || true
+          echo "✅ Cleanup: Test branch deleted"
+        else
+          echo "❌ Push access: FAILED"
+          echo ""
+          echo "TROUBLESHOOTING:"
+          echo "1. Check if GITHUB_TOKEN has 'Contents: Write' permission"
+          echo "2. Verify repository settings allow Actions to create PRs/pushes"
+          echo "3. Check if branch protection rules prevent pushes"
+          exit 1
+        fi
+        
+        # Switch back to original branch
+        git checkout "$GITHUB_REF_NAME"
+        git branch -D "$TEST_BRANCH" 2>/dev/null || true
+        
+        echo ""
+        echo "🎉 All authentication tests PASSED!"
+        echo "The Salt State Converter workflow should work correctly."
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Test External Repository Access
+      if: github.event.inputs.test_mode == 'external_repo' && github.event.inputs.external_repo_url != ''
+      run: |
+        echo "=== External Repository Authentication Test ==="
+        echo "Target Repository: ${{ github.event.inputs.external_repo_url }}"
+        echo ""
+        
+        # Extract repository info
+        REPO_URL="${{ github.event.inputs.external_repo_url }}"
+        
+        echo "--- Testing Clone Access ---"
+        if git clone --depth 1 "$REPO_URL" test_repo 2>&1; then
+          echo "✅ Clone access: WORKING"
+          cd test_repo
+          
+          echo "--- Repository Information ---"
+          git remote -v
+          echo "Current branch: $(git branch --show-current)"
+          echo "Latest commit: $(git log -1 --oneline)"
+          
+          echo "--- Testing Branch Creation ---"
+          TEST_BRANCH="auth-test-$(date +%Y%m%d_%H%M%S)"
+          git checkout -b "$TEST_BRANCH"
+          echo "✅ Branch creation: WORKING ($TEST_BRANCH)"
+          
+          echo "--- Testing File Modification ---"
+          echo "# Auth Test $(date)" > auth_test.tmp
+          git add auth_test.tmp
+          git commit -m "Auth test commit - $(date)"
+          echo "✅ Local commit: WORKING"
+          
+          echo "--- Testing Push Access ---"
+          if git push origin "$TEST_BRANCH" 2>&1; then
+            echo "✅ Push access: WORKING"
+            echo ""
+            echo "🎉 External repository access CONFIRMED!"
+            echo "You can use this repository with the Salt State Converter."
+            
+            # Clean up test branch
+            git push origin --delete "$TEST_BRANCH" 2>/dev/null || true
+            echo "✅ Cleanup: Test branch deleted"
+          else
+            echo "❌ Push access: FAILED"
+            echo ""
+            echo "TROUBLESHOOTING for External Repository:"
+            echo "1. Ensure you have write access to the target repository"
+            echo "2. Check if you're a collaborator or have push permissions"
+            echo "3. Verify the repository exists and is accessible"
+            echo "4. For private repos, ensure proper authentication is configured"
+            exit 1
+          fi
+          
+          cd ..
+          rm -rf test_repo
+        else
+          echo "❌ Clone access: FAILED"
+          echo ""
+          echo "TROUBLESHOOTING:"
+          echo "1. Check if the repository URL is correct"
+          echo "2. Verify the repository exists and is accessible"
+          echo "3. For private repositories, ensure proper authentication"
+          echo "4. Check if the repository has been moved or deleted"
+          exit 1
+        fi
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Generate Authentication Report
+      if: always()
+      run: |
+        echo "=== Authentication Test Summary ==="
+        echo "Date: $(date -u)"
+        echo "Repository: $GITHUB_REPOSITORY"
+        echo "Workflow: $GITHUB_WORKFLOW"
+        echo "Run ID: $GITHUB_RUN_ID"
+        echo ""
+        echo "Test Mode: ${{ github.event.inputs.test_mode || 'current' }}"
+        
+        if [ "${{ github.event.inputs.test_mode }}" == "external_repo" ]; then
+          echo "External Repository: ${{ github.event.inputs.external_repo_url }}"
+        fi
+        echo ""
+        
+        # Check job status and provide recommendations
+        if [ "${{ job.status }}" == "success" ]; then
+          echo "✅ RESULT: Authentication tests PASSED"
+          echo ""
+          echo "NEXT STEPS:"
+          echo "1. Your authentication is properly configured"
+          echo "2. You can now run the Salt State Converter workflow"
+          echo "3. The converter will be able to create branches and push changes"
+          echo ""
+          echo "RECOMMENDED USAGE:"
+          echo "- Go to Actions → Salt State Converter → Run workflow"
+          echo "- Select 'convert' action"
+          echo "- Enable 'Create new branch' and 'Commit changes'"
+          echo "- Optionally enable 'Push to remote repository'"
+        else
+          echo "❌ RESULT: Authentication tests FAILED"
+          echo ""
+          echo "ACTION REQUIRED:"
+          echo "1. Review the error messages above"
+          echo "2. Fix the authentication issues"
+          echo "3. Re-run this test workflow"
+          echo "4. Do not run the Salt State Converter until auth is working"
+        fi
+        
+        echo ""
+        echo "=== GitHub Actions Configuration ==="
+        echo "For this workflow to work properly, ensure:"
+        echo "1. Repository Settings → Actions → General → Workflow permissions:"
+        echo "   - 'Read and write permissions' is selected, OR"
+        echo "   - 'Read repository contents and packages permissions' + custom GITHUB_TOKEN"
+        echo ""
+        echo "2. Repository Settings → Actions → General → Workflow permissions:"
+        echo "   - 'Allow GitHub Actions to create and approve pull requests' is enabled"
+        echo ""
+        echo "3. For external repositories:"
+        echo "   - You must be a collaborator with write access"
+        echo "   - Or the repository must be in your organization with proper permissions"
