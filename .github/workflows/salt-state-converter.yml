@@ -366,9 +366,8 @@ jobs:
                             old_state_id = line.rstrip(':').strip()
                             new_state_id = self.path_to_state_id(old_state_id)
                             
-                            # Replace the state ID line, preserving indentation
-                            indent = line[:len(line) - len(line.lstrip())]
-                            lines[i] = f"{indent}{new_state_id}:"
+                            # Replace the state ID line, always at column 0 (no indentation)
+                            lines[i] = f"{new_state_id}:"
                             
                             # Add 'name' parameter if next line isn't already a name param
                             if i + 1 < len(lines):
