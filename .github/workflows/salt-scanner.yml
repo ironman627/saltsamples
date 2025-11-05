@@ -190,7 +190,7 @@ jobs:
         EOF
     
     - name: Upload Scan Results
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: salt-scan-results
         path: scan_results.json
@@ -265,7 +265,7 @@ jobs:
         EOF
     
     - name: Upload Compliance Report
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: salt-compliance-report
         path: compliance_report.md
@@ -443,7 +443,8 @@ jobs:
         EOF
     
     - name: Upload Batch Results
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: salt-batch-scan-results
+
         path: batch_scan_results.json
