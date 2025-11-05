@@ -187,7 +187,8 @@ jobs:
             json.dump(scan_results, f, indent=2)
         
         # Set output for next job
-        print(f"::set-output name=results::{json.dumps(scan_results['summary'])}")
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write(f"results={json.dumps(scan_results['summary'])}\n")
         
         EOF
     
