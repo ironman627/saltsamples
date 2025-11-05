@@ -493,7 +493,7 @@ jobs:
         # Check if there are changes to commit
         if git diff --quiet; then
           echo "No changes to commit"
-          echo "::set-output name=committed::false"
+          echo "committed=false" >> $GITHUB_OUTPUT
           exit 0
         fi
         
