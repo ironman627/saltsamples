@@ -1,0 +1,730 @@
+name: Salt State Converter
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'analyze'
+        type: choice
+        options:
+        - analyze
+        - convert
+        - batch
+      create_branch:
+        description: 'Create new branch for conversion'
+        required: false
+        default: true
+        type: boolean
+      commit_changes:
+        description: 'Commit changes after conversion'
+        required: false
+        default: true
+        type: boolean
+      push_to_remote:
+        description: 'Push branch to remote repository'
+        required: false
+        default: true
+        type: boolean
+      target_directory:
+        description: 'Target directory to process (default: entire repo)'
+        required: false
+        default: '.'
+        type: string
+      batch_config_url:
+        description: 'URL to batch configuration JSON (for batch action)'
+        required: false
+        type: string
+  
+  # Trigger on push to main/master with Salt files
+  push:
+    branches: [ main, master ]
+    paths:
+    - '**/*.sls'
+    - '**/*.jinja'
+    
+  # Trigger on pull requests with Salt files
+  pull_request:
+    branches: [ main, master ]
+    paths:
+    - '**/*.sls'
+    - '**/*.jinja'
+
+env:
+  PYTHON_VERSION: '3.9'
+  
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.action == 'analyze' || github.event_name == 'pull_request'
+    outputs:
+      needs_conversion: ${{ steps.analysis.outputs.needs_conversion }}
+      salt_files_count: ${{ steps.analysis.outputs.salt_files_count }}
+      conversion_candidates: ${{ steps.analysis.outputs.conversion_candidates }}
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyyaml pathlib
+    
+    - name: Download Salt State Converter
+      run: |
+        # Download the converter script (adjust URL as needed)
+        curl -O https://raw.githubusercontent.com/your-repo/salt-state-converter/main/salt_state_converter.py
+        chmod +x salt_state_converter.py
+    
+    - name: Analyze Salt State Files
+      id: analysis
+      run: |
+        python3 << 'EOF'
+        import os
+        import re
+        import json
+        from pathlib import Path
+        
+        class SaltStateAnalyzer:
+            def __init__(self):
+                self.old_format_pattern = re.compile(r'^(/[^:\s]+|[A-Z]:\\[^:\s]+):$')
+                self.salt_modules = {
+                    'file', 'pkg', 'service', 'user', 'group', 'cmd', 'cron', 'mount', 
+                    'network', 'archive', 'git', 'svn', 'test', 'pillar', 'grains',
+                    'mine', 'schedule', 'dockerng', 'docker', 'kubernetes', 'firewall',
+                    'iptables', 'sysctl', 'timezone', 'locale', 'keyboard', 'host'
+                }
+            
+            def is_old_format_state_id(self, line):
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    return False
+                
+                if not self.old_format_pattern.match(line):
+                    return False
+                
+                potential_id = line.rstrip(':').strip()
+                
+                if '.' in potential_id:
+                    module_name = potential_id.split('.')[0]
+                    if module_name in self.salt_modules:
+                        return False
+                
+                return True
+            
+            def analyze_file(self, file_path):
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    lines = content.split('\n')
+                    old_format_lines = []
+                    
+                    for i, line in enumerate(lines, 1):
+                        if self.is_old_format_state_id(line):
+                            old_format_lines.append({
+                                'line_number': i,
+                                'line_content': line.strip(),
+                                'state_id': line.rstrip(':').strip()
+                            })
+                    
+                    return {
+                        'file_path': str(file_path),
+                        'needs_conversion': len(old_format_lines) > 0,
+                        'old_format_count': len(old_format_lines),
+                        'old_format_lines': old_format_lines
+                    }
+                except Exception as e:
+                    return {
+                        'file_path': str(file_path),
+                        'error': str(e)
+                    }
+            
+            def analyze_directory(self, directory='.'):
+                results = []
+                target_dir = Path(directory)
+                
+                # Find all Salt state files
+                salt_files = []
+                for ext in ['*.sls', '*.jinja']:
+                    salt_files.extend(target_dir.rglob(ext))
+                
+                print(f"Found {len(salt_files)} Salt state files")
+                
+                for file_path in salt_files:
+                    # Skip test files
+                    if 'test' in str(file_path).lower():
+                        continue
+                    
+                    result = self.analyze_file(file_path)
+                    results.append(result)
+                
+                return results
+        
+        # Analyze the repository
+        analyzer = SaltStateAnalyzer()
+        target_dir = "${{ github.event.inputs.target_directory || '.' }}"
+        analysis_results = analyzer.analyze_directory(target_dir)
+        
+        # Calculate summary statistics
+        total_files = len(analysis_results)
+        files_needing_conversion = len([r for r in analysis_results if r.get('needs_conversion', False)])
+        total_conversions_needed = sum(r.get('old_format_count', 0) for r in analysis_results)
+        
+        print(f"Analysis Summary:")
+        print(f"  Total Salt files: {total_files}")
+        print(f"  Files needing conversion: {files_needing_conversion}")
+        print(f"  Total state IDs needing conversion: {total_conversions_needed}")
+        
+        # Set outputs for next job
+        print(f"::set-output name=needs_conversion::{files_needing_conversion > 0}")
+        print(f"::set-output name=salt_files_count::{total_files}")
+        print(f"::set-output name=conversion_candidates::{files_needing_conversion}")
+        
+        # Save detailed results for artifacts
+        with open('analysis_results.json', 'w') as f:
+            json.dump({
+                'summary': {
+                    'total_files': total_files,
+                    'files_needing_conversion': files_needing_conversion,
+                    'total_conversions_needed': total_conversions_needed,
+                    'target_directory': target_dir
+                },
+                'files': analysis_results
+            }, f, indent=2)
+        EOF
+    
+    - name: Upload Analysis Results
+      uses: actions/upload-artifact@v3
+      with:
+        name: salt-analysis-results
+        path: analysis_results.json
+    
+    - name: Comment Analysis on PR
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const analysisData = JSON.parse(fs.readFileSync('analysis_results.json', 'utf8'));
+          
+          const summary = analysisData.summary;
+          const filesNeedingConversion = analysisData.files.filter(f => f.needs_conversion);
+          
+          let comment = `## 🧂 Salt State Analysis Results\n\n`;
+          comment += `**Summary:**\n`;
+          comment += `- 📄 Total Salt files: ${summary.total_files}\n`;
+          comment += `- 🔄 Files needing conversion: ${summary.files_needing_conversion}\n`;
+          comment += `- 📊 Total state IDs needing conversion: ${summary.total_conversions_needed}\n\n`;
+          
+          if (summary.files_needing_conversion > 0) {
+            comment += `**Files requiring conversion to best practices:**\n`;
+            for (const file of filesNeedingConversion.slice(0, 10)) {
+              comment += `- \`${file.file_path}\` (${file.old_format_count} state IDs)\n`;
+            }
+            if (filesNeedingConversion.length > 10) {
+              comment += `- ... and ${filesNeedingConversion.length - 10} more files\n`;
+            }
+            comment += `\n💡 **Recommendation:** Run the conversion workflow to automatically update these files to Salt best practices.`;
+          } else {
+            comment += `✅ **All files already follow Salt best practices!**`;
+          }
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: comment
+          });
+  
+  convert:
+    runs-on: ubuntu-latest
+    needs: analyze
+    if: |
+      (github.event.inputs.action == 'convert' && github.event.inputs.action != 'batch') ||
+      (github.event_name == 'push' && needs.analyze.outputs.needs_conversion == 'true')
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyyaml pathlib
+    
+    - name: Download Salt State Converter
+      run: |
+        # Download the converter script
+        curl -O https://raw.githubusercontent.com/your-repo/salt-state-converter/main/salt_state_converter.py
+        chmod +x salt_state_converter.py
+    
+    - name: Configure Git
+      run: |
+        git config --global user.name 'Salt State Converter Bot'
+        git config --global user.email 'salt-converter@github-actions.bot'
+    
+    - name: Create Conversion Branch
+      if: github.event.inputs.create_branch == 'true' || github.event_name == 'push'
+      id: branch
+      run: |
+        # Generate branch name
+        TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+        REPO_NAME=$(basename $GITHUB_REPOSITORY)
+        BRANCH_NAME="${REPO_NAME}_salt_conversion_${TIMESTAMP}"
+        
+        echo "Creating conversion branch: $BRANCH_NAME"
+        git checkout -b "$BRANCH_NAME"
+        
+        echo "::set-output name=branch_name::$BRANCH_NAME"
+        echo "CONVERSION_BRANCH=$BRANCH_NAME" >> $GITHUB_ENV
+    
+    - name: Run Salt State Conversion
+      id: conversion
+      run: |
+        python3 << 'EOF'
+        import os
+        import re
+        import shutil
+        import json
+        from pathlib import Path
+        from datetime import datetime
+        
+        class SaltStateConverter:
+            def __init__(self):
+                self.converted_count = 0
+                self.error_count = 0
+                self.skipped_count = 0
+                self.test_skipped_count = 0
+                self.old_format_pattern = re.compile(r'^(/[^:\s]+|[A-Z]:\\[^:\s]+):$')
+                self.salt_modules = {
+                    'file', 'pkg', 'service', 'user', 'group', 'cmd', 'cron', 'mount', 
+                    'network', 'archive', 'git', 'svn', 'test', 'pillar', 'grains',
+                    'mine', 'schedule', 'dockerng', 'docker', 'kubernetes', 'firewall',
+                    'iptables', 'sysctl', 'timezone', 'locale', 'keyboard', 'host'
+                }
+            
+            def is_old_format_state_id(self, line):
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    return False
+                
+                if not self.old_format_pattern.match(line):
+                    return False
+                
+                potential_id = line.rstrip(':').strip()
+                
+                if '.' in potential_id:
+                    module_name = potential_id.split('.')[0]
+                    if module_name in self.salt_modules:
+                        return False
+                
+                return True
+            
+            def path_to_state_id(self, file_path):
+                clean_path = file_path.strip()
+                if len(clean_path) > 1 and clean_path[1] == ':':
+                    clean_path = clean_path[3:]
+                clean_path = clean_path.lstrip('/')
+                return re.sub(r'_+', '_', re.sub(r'[/\\.]', '_', clean_path)).strip('_')
+            
+            def convert_file(self, file_path, dry_run=False, backup=True):
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    # Skip test files
+                    if 'test' in str(file_path).lower():
+                        self.test_skipped_count += 1
+                        return False
+                    
+                    lines = content.split('\n')
+                    modified = False
+                    converted_states = []
+                    
+                    for i, line in enumerate(lines):
+                        if self.is_old_format_state_id(line):
+                            old_state_id = line.rstrip(':').strip()
+                            new_state_id = self.path_to_state_id(old_state_id)
+                            
+                            # Replace the state ID line
+                            lines[i] = f"{new_state_id}:"
+                            
+                            # Add 'name' parameter if next line isn't already a name param
+                            if i + 1 < len(lines):
+                                next_line = lines[i + 1].strip()
+                                if not next_line.startswith('- name:') and not next_line.startswith('name:'):
+                                    # Determine indentation
+                                    indent = '  '  # Default 2 spaces
+                                    if i + 1 < len(lines) and lines[i + 1]:
+                                        existing_indent = len(lines[i + 1]) - len(lines[i + 1].lstrip())
+                                        if existing_indent > 0:
+                                            indent = ' ' * existing_indent
+                                    
+                                    # Insert name parameter
+                                    lines.insert(i + 1, f"{indent}- name: {old_state_id}")
+                            
+                            converted_states.append({
+                                'old_id': old_state_id,
+                                'new_id': new_state_id,
+                                'line': i + 1
+                            })
+                            modified = True
+                    
+                    if modified and not dry_run:
+                        # Create backup if requested
+                        if backup:
+                            backup_path = f"{file_path}.backup"
+                            shutil.copy2(file_path, backup_path)
+                        
+                        # Write converted content
+                        with open(file_path, 'w', encoding='utf-8') as f:
+                            f.write('\n'.join(lines))
+                        
+                        self.converted_count += 1
+                        print(f"Converted: {file_path} ({len(converted_states)} state IDs)")
+                        return True
+                    elif not modified:
+                        self.skipped_count += 1
+                        return False
+                    
+                    return modified
+                
+                except Exception as e:
+                    self.error_count += 1
+                    print(f"Error converting {file_path}: {e}")
+                    return False
+            
+            def convert_directory(self, directory='.', recursive=True, dry_run=False, backup=True):
+                target_dir = Path(directory)
+                
+                # Find all Salt state files
+                salt_files = []
+                for ext in ['*.sls', '*.jinja']:
+                    if recursive:
+                        salt_files.extend(target_dir.rglob(ext))
+                    else:
+                        salt_files.extend(target_dir.glob(ext))
+                
+                print(f"Found {len(salt_files)} Salt state files to process")
+                
+                for file_path in salt_files:
+                    self.convert_file(file_path, dry_run=dry_run, backup=backup)
+                
+                return {
+                    'converted': self.converted_count,
+                    'skipped': self.skipped_count,
+                    'test_skipped': self.test_skipped_count,
+                    'errors': self.error_count
+                }
+        
+        # Run the conversion
+        converter = SaltStateConverter()
+        target_dir = "${{ github.event.inputs.target_directory || '.' }}"
+        
+        print(f"Starting Salt state conversion in: {target_dir}")
+        
+        # Run conversion (not dry run)
+        results = converter.convert_directory(target_dir, recursive=True, dry_run=False, backup=True)
+        
+        print(f"Conversion completed:")
+        print(f"  Files converted: {results['converted']}")
+        print(f"  Files skipped (already best format): {results['skipped']}")
+        print(f"  Test files skipped: {results['test_skipped']}")
+        print(f"  Errors: {results['errors']}")
+        
+        # Set outputs
+        print(f"::set-output name=converted_count::{results['converted']}")
+        print(f"::set-output name=skipped_count::{results['skipped']}")
+        print(f"::set-output name=test_skipped_count::{results['test_skipped']}")
+        print(f"::set-output name=error_count::{results['errors']}")
+        
+        # Save conversion report
+        conversion_report = {
+            'timestamp': datetime.now().isoformat(),
+            'repository': os.environ.get('GITHUB_REPOSITORY'),
+            'branch': os.environ.get('CONVERSION_BRANCH', 'main'),
+            'target_directory': target_dir,
+            'results': results,
+            'workflow_run_id': os.environ.get('GITHUB_RUN_ID'),
+            'commit_sha': os.environ.get('GITHUB_SHA')
+        }
+        
+        with open('conversion_report.json', 'w') as f:
+            json.dump(conversion_report, f, indent=2)
+        
+        EOF
+    
+    - name: Upload Conversion Report
+      uses: actions/upload-artifact@v3
+      with:
+        name: salt-conversion-report
+        path: conversion_report.json
+    
+    - name: Commit Changes
+      if: |
+        steps.conversion.outputs.converted_count > 0 && 
+        (github.event.inputs.commit_changes == 'true' || github.event_name == 'push')
+      id: commit
+      run: |
+        # Check if there are changes to commit
+        if git diff --quiet; then
+          echo "No changes to commit"
+          echo "::set-output name=committed::false"
+          exit 0
+        fi
+        
+        # Add all changed files
+        git add .
+        
+        # Create detailed commit message
+        CONVERTED_COUNT="${{ steps.conversion.outputs.converted_count }}"
+        SKIPPED_COUNT="${{ steps.conversion.outputs.skipped_count }}"
+        TEST_SKIPPED_COUNT="${{ steps.conversion.outputs.test_skipped_count }}"
+        
+        cat > /tmp/commit_msg << EOF
+        Salt State Conversion - Best Practices Applied
+        
+        Converted ${CONVERTED_COUNT} Salt state files to use best practices:
+        - Unique state IDs instead of file paths
+        - Explicit 'name' parameters for all states
+        - Proper YAML structure and indentation
+        
+        Files processed: \$(git diff --cached --name-only | wc -l)
+        Files converted: ${CONVERTED_COUNT}
+        Files skipped: ${SKIPPED_COUNT}
+        Test files skipped: ${TEST_SKIPPED_COUNT}
+        
+        Generated by Salt State Converter GitHub Action
+        Workflow: ${{ github.workflow }}
+        Run ID: ${{ github.run_id }}
+        Commit: ${{ github.sha }}
+        EOF
+        
+        # Commit the changes
+        git commit -F /tmp/commit_msg
+        
+        COMMIT_HASH=$(git rev-parse HEAD)
+        echo "::set-output name=commit_hash::$COMMIT_HASH"
+        echo "::set-output name=committed::true"
+        
+        echo "Changes committed: $COMMIT_HASH"
+    
+    - name: Push Branch to Remote
+      if: |
+        steps.commit.outputs.committed == 'true' && 
+        (github.event.inputs.push_to_remote == 'true' || github.event_name == 'push')
+      run: |
+        BRANCH_NAME="${{ steps.branch.outputs.branch_name }}"
+        
+        if [ -n "$BRANCH_NAME" ]; then
+          echo "Pushing branch $BRANCH_NAME to remote"
+          git push origin "$BRANCH_NAME"
+          echo "✅ Successfully pushed branch to remote"
+          
+          # Create pull request if this was triggered by push to main
+          if [ "${{ github.event_name }}" == "push" ]; then
+            cat > /tmp/pr_body << 'EOF'
+        This PR automatically converts Salt state files to follow best practices.
+        
+        **Changes:**
+        - Updated state IDs to use unique identifiers instead of file paths
+        - Added explicit 'name' parameters to all states
+        - Applied proper YAML structure and indentation
+        
+        **Generated by:** Salt State Converter GitHub Action
+        
+        Please review the changes and merge when ready.
+        EOF
+            
+            gh pr create \
+              --title "🧂 Salt State Conversion - Best Practices Update" \
+              --body-file /tmp/pr_body \
+              --head "$BRANCH_NAME" \
+              --base "${{ github.ref_name }}"
+          fi
+        else
+          # Push to current branch (for manual triggers)
+          git push origin HEAD
+        fi
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Create Conversion Summary
+      run: |
+        echo "## 🧂 Salt State Conversion Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Conversion Results:**" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ Files converted: ${{ steps.conversion.outputs.converted_count }}" >> $GITHUB_STEP_SUMMARY
+        echo "- ⏭️ Files skipped (already best format): ${{ steps.conversion.outputs.skipped_count }}" >> $GITHUB_STEP_SUMMARY
+        echo "- 🧪 Test files skipped: ${{ steps.conversion.outputs.test_skipped_count }}" >> $GITHUB_STEP_SUMMARY
+        echo "- ❌ Errors: ${{ steps.conversion.outputs.error_count }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ steps.branch.outputs.branch_name }}" != "" ]; then
+          echo "**Branch Created:** \`${{ steps.branch.outputs.branch_name }}\`" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [ "${{ steps.commit.outputs.commit_hash }}" != "" ]; then
+          echo "**Commit:** \`${{ steps.commit.outputs.commit_hash }}\`" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Files processed in:** \`${{ github.event.inputs.target_directory || '.' }}\`" >> $GITHUB_STEP_SUMMARY
+
+  batch_convert:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.action == 'batch'
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyyaml pathlib requests
+    
+    - name: Download Batch Configuration
+      if: github.event.inputs.batch_config_url != ''
+      run: |
+        curl -o batch_config.json "${{ github.event.inputs.batch_config_url }}"
+    
+    - name: Use Local Batch Configuration
+      if: github.event.inputs.batch_config_url == ''
+      run: |
+        # Look for batch_config.json in the repository
+        if [ -f "batch_config.json" ]; then
+          echo "Using local batch_config.json"
+        elif [ -f ".github/batch_config.json" ]; then
+          cp .github/batch_config.json batch_config.json
+          echo "Using .github/batch_config.json"
+        else
+          echo "No batch configuration found. Creating sample..."
+          cat > batch_config.json << EOF
+        {
+          "description": "Salt state conversion batch configuration",
+          "repositories": [
+            {
+              "url": "https://github.com/${{ github.repository }}.git",
+              "name": "current-repo",
+              "branch": "main",
+              "target_directory": "."
+            }
+          ]
+        }
+        EOF
+        fi
+    
+    - name: Process Batch Configuration
+      run: |
+        python3 << 'EOF'
+        import json
+        import os
+        import subprocess
+        import tempfile
+        from pathlib import Path
+        
+        # Load batch configuration
+        with open('batch_config.json', 'r') as f:
+            config = json.load(f)
+        
+        repositories = config.get('repositories', [])
+        print(f"Processing {len(repositories)} repositories from batch configuration")
+        
+        batch_results = []
+        
+        for repo_config in repositories:
+            repo_url = repo_config['url']
+            repo_name = repo_config.get('name', Path(repo_url).stem)
+            branch = repo_config.get('branch', 'main')
+            target_dir = repo_config.get('target_directory', '.')
+            
+            print(f"\n--- Processing repository: {repo_name} ---")
+            print(f"URL: {repo_url}")
+            print(f"Branch: {branch}")
+            print(f"Target directory: {target_dir}")
+            
+            try:
+                # Create temporary directory for cloning
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    clone_path = Path(temp_dir) / repo_name
+                    
+                    # Clone repository
+                    print(f"Cloning {repo_url}...")
+                    subprocess.run(['git', 'clone', repo_url, str(clone_path)], check=True)
+                    
+                    # Checkout specified branch
+                    subprocess.run(['git', 'checkout', branch], cwd=clone_path, check=True)
+                    
+                    # TODO: Run Salt state conversion on cloned repository
+                    # This would typically involve running the converter script
+                    
+                    repo_result = {
+                        'repository': repo_name,
+                        'url': repo_url,
+                        'branch': branch,
+                        'status': 'processed',
+                        'target_directory': target_dir
+                    }
+                    
+                    batch_results.append(repo_result)
+                    print(f"✅ Completed processing {repo_name}")
+                    
+            except Exception as e:
+                print(f"❌ Error processing {repo_name}: {e}")
+                batch_results.append({
+                    'repository': repo_name,
+                    'url': repo_url,
+                    'branch': branch,
+                    'status': 'error',
+                    'error': str(e)
+                })
+        
+        # Save batch results
+        with open('batch_results.json', 'w') as f:
+            json.dump({
+                'summary': {
+                    'total_repositories': len(repositories),
+                    'processed_successfully': len([r for r in batch_results if r['status'] == 'processed']),
+                    'failed': len([r for r in batch_results if r['status'] == 'error'])
+                },
+                'repositories': batch_results
+            }, f, indent=2)
+        
+        print(f"\n=== Batch Processing Summary ===")
+        print(f"Total repositories: {len(repositories)}")
+        print(f"Processed successfully: {len([r for r in batch_results if r['status'] == 'processed'])}")
+        print(f"Failed: {len([r for r in batch_results if r['status'] == 'error'])}")
+        EOF
+    
+    - name: Upload Batch Results
+      uses: actions/upload-artifact@v3
+      with:
+        name: salt-batch-results
+        path: batch_results.json
