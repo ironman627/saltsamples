@@ -1,14 +1,14 @@
 {
-  "timestamp": "2025-11-06T17:15:54.224872",
+  "timestamp": "2025-11-06T18:47:48.691185",
   "repository": "ironman627/saltsamples",
-  "branch": "saltsamples_salt_conversion_20251106_171554",
+  "branch": "saltsamples_salt_conversion_20251106_184748",
   "target_directory": ".",
   "results": {
-    "converted": 5,
-    "skipped": 5,
+    "converted": 3,
+    "skipped": 7,
     "test_skipped": 2,
     "errors": 0
   },
-  "workflow_run_id": "19143901537",
-  "commit_sha": "c266d05c145bfc6f234ffad188fca093ab5ccd61"
+  "workflow_run_id": "19146316648",
+  "commit_sha": "2097fad04f3078e7a2265300d9f1ec41e3f284ec"
 }
