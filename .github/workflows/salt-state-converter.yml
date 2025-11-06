@@ -110,7 +110,8 @@ jobs:
         
         class SaltStateAnalyzer:
             def __init__(self):
-                self.old_format_pattern = re.compile(r'^(/[^:\s]+|[A-Z]:\\[^:\s]+):$')
+                # Match both Linux (/path) and Windows (C:\path or \\server\path) paths
+                self.old_format_pattern = re.compile(r'^(/[^:\s]+|[A-Z]:[/\\][^:\s]*|\\\\[^:\s]+):$')
                 self.salt_modules = {
                     'file', 'pkg', 'service', 'user', 'group', 'cmd', 'cron', 'mount', 
                     'network', 'archive', 'git', 'svn', 'test', 'pillar', 'grains',
@@ -339,13 +340,15 @@ jobs:
                 self.error_count = 0
                 self.skipped_count = 0
                 self.test_skipped_count = 0
-                self.old_format_pattern = re.compile(r'^(/[^:\s]+|[A-Z]:\\[^:\s]+):$')
+                # Match both Linux (/path) and Windows (C:\path or \\server\path) paths
+                self.old_format_pattern = re.compile(r'^(/[^:\s]+|[A-Z]:[/\\][^:\s]*|\\\\[^:\s]+):$')
                 self.salt_modules = {
                     'file', 'pkg', 'service', 'user', 'group', 'cmd', 'cron', 'mount', 
                     'network', 'archive', 'git', 'svn', 'test', 'pillar', 'grains',
                     'mine', 'schedule', 'dockerng', 'docker', 'kubernetes', 'firewall',
                     'iptables', 'sysctl', 'timezone', 'locale', 'keyboard', 'host'
                 }
+                self.state_id_usage = {}  # Track duplicate IDs
             
             def is_old_format_state_id(self, line):
                 line = line.strip()
@@ -364,12 +367,33 @@ jobs:
                 
                 return True
             
-            def path_to_state_id(self, file_path):
+            def path_to_state_id(self, file_path, ensure_unique=True):
                 clean_path = file_path.strip()
+                
+                # Handle Windows drive letter (C:\path)
                 if len(clean_path) > 1 and clean_path[1] == ':':
-                    clean_path = clean_path[3:]
-                clean_path = clean_path.lstrip('/')
-                return re.sub(r'_+', '_', re.sub(r'[/\\.]', '_', clean_path)).strip('_')
+                    # Remove drive letter and colon (C:)
+                    clean_path = clean_path[2:]
+                
+                # Handle UNC paths (\\server\share)
+                if clean_path.startswith('\\\\'):
+                    clean_path = clean_path[2:]
+                
+                # Remove leading slashes/backslashes
+                clean_path = clean_path.lstrip('/\\')
+                
+                # Replace path separators (both / and \) and dots with underscores
+                base_id = re.sub(r'_+', '_', re.sub(r'[/\\.]', '_', clean_path)).strip('_')
+                
+                # Handle duplicate IDs
+                if ensure_unique:
+                    if base_id in self.state_id_usage:
+                        self.state_id_usage[base_id] += 1
+                        return f"{base_id}_{self.state_id_usage[base_id]}"
+                    else:
+                        self.state_id_usage[base_id] = 1
+                
+                return base_id
             
             def convert_file(self, file_path, dry_run=False, backup=True):
                 try:
@@ -381,31 +405,62 @@ jobs:
                         self.test_skipped_count += 1
                         return False
                     
+                    # Reset state ID usage tracker for each file
+                    self.state_id_usage = {}
+                    
                     lines = content.split('\n')
                     modified = False
                     converted_states = []
+                    i = 0
                     
-                    for i, line in enumerate(lines):
+                    while i < len(lines):
+                        line = lines[i]
+                        
                         if self.is_old_format_state_id(line):
                             old_state_id = line.rstrip(':').strip()
-                            new_state_id = self.path_to_state_id(old_state_id)
+                            new_state_id = self.path_to_state_id(old_state_id, ensure_unique=True)
                             
                             # Replace the state ID line
                             lines[i] = f"{new_state_id}:"
                             
-                            # Add 'name' parameter if next line isn't already a name param
-                            if i + 1 < len(lines):
-                                next_line = lines[i + 1].strip()
-                                if not next_line.startswith('- name:') and not next_line.startswith('name:'):
-                                    # Determine indentation
-                                    indent = '  '  # Default 2 spaces
-                                    if i + 1 < len(lines) and lines[i + 1]:
-                                        existing_indent = len(lines[i + 1]) - len(lines[i + 1].lstrip())
-                                        if existing_indent > 0:
-                                            indent = ' ' * existing_indent
-                                    
-                                    # Insert name parameter
-                                    lines.insert(i + 1, f"{indent}- name: {old_state_id}")
+                            # Find the next line with module.function
+                            j = i + 1
+                            module_function_line = None
+                            module_function_idx = None
+                            
+                            while j < len(lines):
+                                next_line = lines[j].strip()
+                                # Stop if we hit another state ID or empty section
+                                if next_line and not next_line.startswith('#'):
+                                    # Check if it's a module.function line
+                                    if '.' in next_line and ':' in next_line:
+                                        parts = next_line.split('.')
+                                        if len(parts) >= 2 and parts[0] in self.salt_modules:
+                                            module_function_line = next_line
+                                            module_function_idx = j
+                                            break
+                                    # If we hit another state declaration, stop
+                                    if self.is_old_format_state_id(lines[j]) or (next_line.endswith(':') and not next_line.startswith('-')):
+                                        break
+                                j += 1
+                            
+                            # Insert name parameter after module.function if found
+                            if module_function_idx is not None:
+                                # Check if name already exists
+                                has_name = False
+                                k = module_function_idx + 1
+                                while k < len(lines) and lines[k].strip() and lines[k].strip().startswith('-'):
+                                    if lines[k].strip().startswith('- name:'):
+                                        has_name = True
+                                        break
+                                    k += 1
+                                
+                                if not has_name:
+                                    # Get indentation from the module.function line
+                                    indent_level = len(lines[module_function_idx]) - len(lines[module_function_idx].lstrip())
+                                    indent = ' ' * indent_level
+                                    # Insert name parameter with proper indentation
+                                    lines.insert(module_function_idx + 1, f"{indent}  - name: {old_state_id}")
                             
                             converted_states.append({
                                 'old_id': old_state_id,
@@ -413,6 +468,8 @@ jobs:
                                 'line': i + 1
                             })
                             modified = True
+                        
+                        i += 1
                     
                     if modified and not dry_run:
                         # Create backup if requested
