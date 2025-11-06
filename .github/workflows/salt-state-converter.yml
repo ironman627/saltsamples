@@ -176,10 +176,6 @@ jobs:
                 print(f"Found {len(salt_files)} Salt state files")
                 
                 for file_path in salt_files:
-                    # Skip test files
-                    if 'test' in str(file_path).lower():
-                        continue
-                    
                     result = self.analyze_file(file_path)
                     results.append(result)
                 
@@ -400,9 +396,17 @@ jobs:
                     with open(file_path, 'r', encoding='utf-8') as f:
                         content = f.read()
                     
-                    # Skip test files
-                    if 'test' in str(file_path).lower():
+                    # Check if file uses test.* module (skip those)
+                    uses_test_module = False
+                    for line in content.split('\n'):
+                        stripped = line.strip()
+                        if stripped.startswith('test.') and ':' in stripped:
+                            uses_test_module = True
+                            break
+                    
+                    if uses_test_module:
                         self.test_skipped_count += 1
+                        print(f"Skipped (uses test module): {file_path}")
                         return False
                     
                     # Reset state ID usage tracker for each file
