@@ -2,12 +2,13 @@ name: Salt State Converter
 
 # SETUP REQUIRED: To enable approval requirements for automatic conversions:
 # 1. Go to Settings > Environments in your GitHub repository
-# 2. Create a new environment named "salt-conversion-approval"
+# 2. Create a new environment named "salt-conversion-approval" (exact name required)
 # 3. Under "Deployment protection rules", check "Required reviewers"
-# 4. Add the admin(s) who should approve conversions
-# 5. (Optional) Set a wait timer before auto-approval
+# 4. Add the admin(s) who should approve conversions (e.g., ironman627)
+# 5. Click "Save protection rules"
 # 
-# This ensures no automatic conversions happen without admin approval.
+# Without this setup, the convert job will be SKIPPED (no approval, no conversion).
+# See .github/workflows/SETUP-APPROVAL.md for detailed instructions.
 
 on:
   workflow_dispatch:
@@ -66,7 +67,11 @@ env:
 jobs:
   analyze:
     runs-on: ubuntu-latest
-    if: github.event.inputs.action == 'analyze' || github.event_name == 'pull_request' || github.event_name == 'push'
+    if: |
+      github.event.inputs.action == 'analyze' || 
+      github.event.inputs.action == 'convert' ||
+      github.event_name == 'pull_request' || 
+      github.event_name == 'push'
     outputs:
       needs_conversion: ${{ steps.analysis.outputs.needs_conversion }}
       salt_files_count: ${{ steps.analysis.outputs.salt_files_count }}
@@ -259,9 +264,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: analyze
     # Use an environment to require approval before running conversion
-    environment: 
-      name: salt-conversion-approval
-      url: ${{ steps.branch.outputs.branch_url }}
+    environment: salt-conversion-approval
     if: |
       (github.event.inputs.action == 'convert' && github.event.inputs.action != 'batch') ||
       (github.event_name == 'push' && needs.analyze.outputs.needs_conversion == 'true')
