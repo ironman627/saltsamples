@@ -1,0 +1,103 @@
+{# Included as a script string; JSON is passed as data, not PowerShell code. #}
+$ErrorActionPreference = 'Stop'
+$settings = ConvertFrom-Json -InputObject '{{ cfg.get("windows", {}).get("runtime_paths", []) | tojson | replace("'", "''") }}'
+$extraApacheConfigs = ConvertFrom-Json -InputObject '{{ cfg.get("windows", {}).get("apache_configs", {}) | tojson | replace("'", "''") }}'
+$found = @{}
+$issues = New-Object System.Collections.Generic.List[string]
+function Add-Runtime([string] $candidate) {
+    try {
+    if (-not $candidate) { return }
+    $expanded = [Environment]::ExpandEnvironmentVariables($candidate)
+    if (-not (Test-Path -LiteralPath $expanded -PathType Leaf)) { return }
+    $item = Get-Item -LiteralPath $expanded
+    if ($item.Name -match '^(php(?:-cgi)?[.]exe|php[0-9]+(?:ts|apache2_4)?[.]dll)$') { $kind = 'php' }
+    elseif ($item.Name -eq 'httpd.exe') { $kind = 'apache' }
+    else { return }
+    $version = $item.VersionInfo.ProductVersion
+    if (-not $version) { $version = $item.VersionInfo.FileVersion }
+    $found[$item.FullName.ToLowerInvariant()] = @{path=$item.FullName; component=$kind; version=[string]$version}
+    } catch { $issues.Add($_.Exception.Message) }
+}
+foreach ($path in @($settings)) {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        $issues.Add("Configured runtime missing: $path")
+    } else {
+        Add-Runtime $path
+        $resolvedPath = (Get-Item -LiteralPath $path).FullName.ToLowerInvariant()
+        if (-not $found.ContainsKey($resolvedPath)) { $issues.Add("Configured runtime is not a recognized PHP/Apache binary: $path") }
+    }
+}
+foreach ($command in @('php.exe', 'php-cgi.exe', 'httpd.exe')) {
+    foreach ($entry in @(Get-Command $command -CommandType Application -All -ErrorAction SilentlyContinue)) {
+        Add-Runtime $entry.Source
+    }
+}
+$patterns = @(
+    'C:\PHP\php*.exe', 'C:\PHP\php*.dll', 'C:\PHP*\php*.exe',
+    'C:\Program Files\PHP*\php*.exe', 'C:\Program Files (x86)\PHP*\php*.exe',
+    'C:\Apache*\bin\httpd.exe', 'C:\Program Files\Apache*\bin\httpd.exe',
+    'C:\xampp\php\php*.exe', 'C:\xampp\apache\bin\httpd.exe',
+    'C:\wamp*\bin\php\php*\php*.exe', 'C:\wamp*\bin\apache\apache*\bin\httpd.exe'
+)
+foreach ($pattern in $patterns) {
+    foreach ($item in @(Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue)) {
+        Add-Runtime $item.FullName
+    }
+}
+try {
+    foreach ($process in @(Get-CimInstance Win32_Process -Filter "Name='php.exe' OR Name='php-cgi.exe' OR Name='httpd.exe'")) {
+        if ($process.ExecutablePath) { Add-Runtime $process.ExecutablePath }
+        else { $issues.Add('Unable to read runtime process path.') }
+    }
+    foreach ($service in @(Get-CimInstance Win32_Service)) {
+        if ($service.PathName -match '(?i)^\s*"([^"]+\\(?:php(?:-cgi)?|httpd)[.]exe)"') { Add-Runtime $Matches[1] }
+        elseif ($service.PathName -match '(?i)^\s*([^"\s]+\\(?:php(?:-cgi)?|httpd)[.]exe)') { Add-Runtime $Matches[1] }
+    }
+    $appHost = Join-Path $env:windir 'System32\inetsrv\config\applicationHost.config'
+    if (Test-Path -LiteralPath $appHost) {
+        [xml]$iis = Get-Content -LiteralPath $appHost -Raw
+        foreach ($node in @($iis.SelectNodes('//fastCgi/application'))) { Add-Runtime $node.fullPath }
+        foreach ($node in @($iis.SelectNodes('//handlers/add'))) {
+            if ($node.scriptProcessor) { Add-Runtime (($node.scriptProcessor -split '\|')[0]) }
+        }
+    }
+} catch { $issues.Add($_.Exception.Message) }
+# Apache can load PHP as a DLL without php.exe or php-cgi.exe on PATH.
+# Inspect conf files beneath discovered Apache roots, plus explicitly supplied
+# config files. Parsing is read-only and conservative about conditional modules.
+$apacheConfigs = @{}
+foreach ($runtime in @($found.Values)) {
+    if ($runtime.component -eq 'apache') {
+        $serverRoot = Split-Path (Split-Path $runtime.path -Parent) -Parent
+        $confRoot = Join-Path $serverRoot 'conf'
+        if (Test-Path -LiteralPath $confRoot) {
+            foreach ($configFile in @(Get-ChildItem -LiteralPath $confRoot -Filter '*.conf' -File -Recurse -ErrorAction SilentlyContinue)) {
+                $apacheConfigs[$configFile.FullName] = $serverRoot
+            }
+        }
+    }
+}
+foreach ($property in $extraApacheConfigs.PSObject.Properties) { $apacheConfigs[$property.Name] = [string]$property.Value }
+foreach ($configPath in @($apacheConfigs.Keys)) {
+    try {
+        $rootPath = $apacheConfigs[$configPath]
+        $lines = @(Get-Content -LiteralPath $configPath)
+        $defines = @{SRVROOT=$rootPath}
+        foreach ($line in $lines) {
+            if ($line -match '^\s*Define\s+(\w+)\s+(?:"([^"]+)"|(\S+))') {
+                $defines[$Matches[1]] = if ($Matches[2]) { $Matches[2] } else { $Matches[3] }
+            }
+        }
+        foreach ($line in $lines) {
+            if ($line -match '^\s*LoadModule\s+php\w*\s+(?:"([^"]+)"|(\S+))') {
+                $modulePath = if ($Matches[1]) { $Matches[1] } else { $Matches[2] }
+                foreach ($key in $defines.Keys) { $modulePath = $modulePath.Replace(('${' + $key + '}'), $defines[$key]) }
+                if ($modulePath.Contains('${')) { $issues.Add("Unresolved Apache PHP module path in $configPath"); continue }
+                if (-not [IO.Path]::IsPathRooted($modulePath)) { $modulePath = Join-Path $rootPath $modulePath }
+                if (-not (Test-Path -LiteralPath $modulePath -PathType Leaf)) { $issues.Add("Apache PHP module missing: $modulePath"); continue }
+                Add-Runtime $modulePath
+            }
+        }
+    } catch { $issues.Add($_.Exception.Message) }
+}
+@{runtimes=@($found.Values); issues=@($issues.ToArray())}

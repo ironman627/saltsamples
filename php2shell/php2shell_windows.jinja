@@ -1,0 +1,59 @@
+{# Windows package versions and portable-runtime inventory. No installation
+   or service calls run during rendering. Winrepo may build its metadata cache. #}
+{% set win = cfg.get('windows', {}) %}
+{% set inventory = [] %}
+{% set errors = [] %}
+{% set windows_unknown = [] %}
+{% set services = cfg.get('services', {}).copy() %}
+{% do services.update(win.get('services', {})) %}
+{% set minimums = cfg.get('minimum_versions', {}) %}
+{% set package_roles = win.get('packages', {}) %}
+{% set owners = {} %}
+{% for path, owner in win.get('runtime_packages', {}).items() %}{% do owners.update({path | lower: owner}) %}{% endfor %}
+{% set installed = salt['pkg.list_pkgs'](versions_as_list=True, refresh=False) %}
+{% for name, versions in installed | dictsort %}
+  {% set role = package_roles.get(name, '') %}
+  {% if not role and (name | lower | regex_search('^(php(?:[- _0-9.]|$)|php[0-9])')) is not none %}{% set role = 'php' %}{% endif %}
+  {% if not role and (name | lower | regex_search('^(apache(?:[- _0-9.]|$)|httpd(?:[- _0-9.]|$))')) is not none %}{% set role = 'apache' %}{% endif %}
+  {% if role in ['php', 'apache'] %}
+    {% set versions = [versions] if versions is string else (versions or ['']) %}
+    {% if versions | length != 1 %}{% do errors.append(name ~ ': multiple installed versions require review.') %}{% endif %}
+    {% for current in versions %}
+      {% set branch = current.split('.')[:2] | join('.') %}
+      {% set minimum = minimums.get(name, php_floors.get(branch, '') if role == 'php' else '') %}
+      {% set valid = (current | regex_search('^[0-9]+[.][0-9]+[.][0-9]+(?:[.][0-9]+)?$')) is not none %}
+      {% set meets = salt['pkg.compare_versions'](ver1=current, oper='>=', ver2=minimum) if valid and minimum else false %}
+      {% set status = 'uncomparable' if not valid else (('meets_baseline' if meets else 'below_baseline') if minimum else ('unknown_baseline' if role == 'php' else 'vendor_advisory_required')) %}
+      {% do inventory.append({'package': name, 'component': role, 'installed': current, 'minimum': minimum, 'status': status, 'managed': true, 'needs_review': versions | length != 1}) %}
+      {% if status in ['unknown_baseline', 'uncomparable'] %}{% do errors.append(name ~ ': unknown version/fix baseline; configure a verified minimum or migrate this branch.') %}{% endif %}
+    {% endfor %}
+  {% endif %}
+{% endfor %}
+{% set scan_script %}{% include 'php2shell/php2shell_windows_scan.ps1.jinja' %}{% endset %}
+{# Use an explicit script block: Salt appends its JSON pipeline, and raw
+   multiline scripts/trailing newlines can otherwise break PowerShell 5.1. #}
+{% set scan = salt['cmd.powershell']('& {\n' ~ scan_script ~ '\n}', depth=5, timeout=60, encode_cmd=true) %}
+{% if scan is not mapping or scan.get('runtimes') is not sequence or scan.get('runtimes') is string or scan.get('runtimes') is mapping or scan.get('issues') is not sequence or scan.get('issues') is string or scan.get('issues') is mapping %}
+  {% do windows_unknown.append('Windows runtime scan did not return valid inventory.') %}
+{% else %}
+  {% for issue in scan.issues %}{% do windows_unknown.append(issue) %}{% endfor %}
+  {% for runtime in scan.runtimes %}
+  {% if runtime is mapping and runtime.get('path') is string and runtime.get('component') in ['php', 'apache'] and runtime.get('version') is string %}
+    {% set version = runtime.version | trim %}
+    {% set valid = (version | regex_search('^[0-9]+[.][0-9]+[.][0-9]+(?:[.][0-9]+)?$')) is not none %}
+    {% set branch = version.split('.')[:2] | join('.') %}
+    {% set minimum = php_floors.get(branch, '') if runtime.component == 'php' else '' %}
+    {% set meets = salt['pkg.compare_versions'](ver1=version, oper='>=', ver2=minimum) if minimum and valid else false %}
+    {% set status = ('meets_baseline' if meets else ('below_baseline' if valid and minimum else 'unknown_baseline')) if runtime.component == 'php' else 'vendor_advisory_required' %}
+    {% set owner = owners.get(runtime.path | lower, '') %}
+    {% do inventory.append({'package': runtime.path, 'component': runtime.component, 'installed': version, 'minimum': minimum, 'status': status, 'managed': false, 'owner': owner}) %}
+    {% if not owner or owner not in installed or package_roles.get(owner) != runtime.component %}
+      {% do errors.append(runtime.path ~ ': configure windows:runtime_packages and windows:packages for an installed Winrepo package, or patch this portable deployment separately.') %}
+    {% endif %}
+    {% if status == 'unknown_baseline' %}{% do windows_unknown.append(runtime.path ~ ': version or fixed baseline cannot be determined.') %}{% endif %}
+  {% else %}
+    {% do windows_unknown.append('Windows runtime scan returned an incomplete runtime entry.') %}
+  {% endif %}
+  {% endfor %}
+{% endif %}
+{% for issue in windows_unknown %}{% do errors.append(issue) %}{% endfor %}

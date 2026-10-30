@@ -1,0 +1,131 @@
+{# Shared read-only inventory. Import with context; requires Salt 3006+.
+   Baselines verified 2026-10-22. See README.rst for sources and limitations. #}
+{% set cfg = salt['pillar.get']('php2shell', {}) %}
+{% set is_windows = grains.get('kernel') == 'Windows' or grains.get('os_family') == 'Windows' %}
+{% set supported = is_windows or (grains.get('kernel') == 'Linux' and grains.get('os_family') in ['Debian', 'RedHat', 'Suse']) %}
+{% set php_floors = {'8.2': '8.2.35', '8.3': '8.3.36', '8.4': '8.4.27', '8.5': '8.5.12'} %}
+{# Ubuntu USN-8948-1 fixes both original CVEs. Match OS release, PHP branch,
+   official build marker and upstream base; do not certify a newer PPA branch
+   merely because it sorts above the older Ubuntu backport version. #}
+{% set ubuntu_floors = {
+  '22.04': {'8.1': '8.1.2-1ubuntu2.28'},
+  '24.04': {'8.3': '8.3.6-0ubuntu0.24.04.13'},
+  '26.04': {'8.5': '8.5.4-0ubuntu1.5'},
+  '26.10': {'8.5': '8.5.9-0ubuntu2.1'}
+} %}
+{% set windows_unknown = [] %}
+{% if is_windows %}
+{% import 'php2shell/php2shell_windows.jinja' as windows_map with context %}
+{% set inventory = windows_map.inventory %}
+{% set errors = windows_map.errors %}
+{% set services = windows_map.services %}
+{% set windows_unknown = windows_map.windows_unknown %}
+{% else %}
+{% set inventory = [] %}
+{% set errors = [] %}
+{% set services = {} %}
+{% set minimums = cfg.get('minimum_versions', {}) %}
+{% set extra_php = cfg.get('extra_php_packages', []) %}
+{% set extra_apache = cfg.get('extra_apache_packages', []) %}
+{% set installed = salt['pkg.list_pkgs'](versions_as_list=True) if supported else {} %}
+{% if not supported %}
+  {% do errors.append('Unsupported platform: use Windows or Linux Debian/Ubuntu, RedHat-family or SUSE package installations.') %}
+{% endif %}
+{% for name, versions in installed | dictsort %}
+  {% set versions = [versions] if versions is string else (versions or ['']) %}
+  {% set base = name.split(':')[0] %}
+  {% set php = (base | regex_search('^(?:(?:rh-)?php[0-9]*(?:[.][0-9]+)?(?:-php)?(?:-(?:common|cli|fpm|cgi|phpdbg|core|opcache))?|libapache2-mod-php[0-9]*(?:[.][0-9]+)?|apache2-mod_php[0-9]*|mod_php[0-9]*)$')) is not none or name in extra_php %}
+  {# Debian/Ubuntu php-common is shared packaging utilities (e.g. 2:93ubuntu2),
+     while unversioned metapackages use versions such as 2:8.3+93ubuntu2.
+     Neither is a PHP engine. RPM php-common IS runtime content: retain it. #}
+  {% set sample = versions[0] %}
+  {% if php and grains.get('os_family') == 'Debian' and name not in extra_php and (base == 'php-common' or ('+' in sample and (sample.split(':')[-1] | regex_search('^[0-9]+[.][0-9]+[+]')) is not none)) %}
+    {% set php = false %}
+  {% endif %}
+  {% set apache = base in ['apache2', 'apache2-bin', 'apache2-data', 'apache2-utils', 'httpd', 'httpd-core', 'httpd-tools', 'apache2-prefork', 'apache2-worker', 'apache2-event', 'mod_ssl'] or name in extra_apache %}
+  {% if php or apache %}
+    {% set kind = 'php' if php else 'apache' %}
+    {% if versions | length != 1 %}
+      {% do errors.append(name ~ ': multiple installed versions require manual review before patching.') %}
+    {% endif %}
+    {% for current in versions %}
+      {% set upstream = current.split(':')[-1].split('-')[0] %}
+      {% set branch = upstream.split('.')[:2] | join('.') %}
+      {% set epoch = current.split(':')[0] ~ ':' if ':' in current else '' %}
+      {# Apache fixes are distribution/advisory specific. Without an override,
+         maintain repository updates but do not assert security compliance. #}
+      {% set fallback = php_floors.get(branch, '') if php else '' %}
+      {% set vendor_floor = ubuntu_floors.get(grains.get('osrelease', '') | string, {}).get(branch, '') if php and grains.get('os') == 'Ubuntu' and cfg.get('use_vendor_baselines', true) else '' %}
+      {% set vendor_prefix = vendor_floor.rsplit('.', 1)[0] ~ '.' if vendor_floor else '' %}
+      {% set build = current.split(':')[-1] %}
+      {% set vendor_match = vendor_floor and build.startswith(vendor_prefix) and (build[vendor_prefix | length:] | regex_search('^[0-9]+$')) is not none and (base.startswith('php' ~ branch) or base == 'libapache2-mod-php' ~ branch) %}
+      {% if vendor_match %}{% set fallback = vendor_floor %}{% endif %}
+      {% set minimum = minimums.get(name, epoch ~ fallback if fallback else '') %}
+      {% set comparison = salt['pkg.version_cmp'](current, minimum, ignore_epoch=False) if minimum else none %}
+      {% set status = ('vendor_advisory_required' if apache else 'unknown_baseline') if not minimum else ('uncomparable' if comparison is none else ('below_baseline' if comparison < 0 else 'meets_baseline')) %}
+      {% do inventory.append({'package': name, 'component': kind, 'installed': current, 'minimum': minimum, 'baseline_source': 'vendor_override' if name in minimums else ('Ubuntu USN-8948-1' if vendor_match else ('upstream' if php else 'repository_updates_only')), 'status': status, 'needs_review': versions | length != 1}) %}
+      {% if status in ['unknown_baseline', 'uncomparable'] %}
+        {% do errors.append(name ~ ': ' ~ status ~ '; supply a vendor-approved full package version in php2shell:minimum_versions or migrate this branch.') %}
+      {% endif %}
+    {% endfor %}
+    {# Config tests use argv lists, never pillar-supplied shell interpolation. #}
+    {% if php and base.endswith('-fpm') %}
+      {% set executable = 'php-fpm' ~ base[3:-4] if base.startswith('php') and (base[3:-4] | regex_search('^[0-9]+[.][0-9]+$')) is not none else base %}
+      {% do services.update({base: [executable, '-t']}) %}
+    {% elif apache and base in ['apache2', 'apache2-bin', 'httpd', 'httpd-core'] %}
+      {% set service_name = 'apache2' if grains.get('os_family') in ['Debian', 'Suse'] else 'httpd' %}
+      {% do services.update({service_name: ['apachectl' if service_name == 'httpd' else 'apache2ctl', 'configtest']}) %}
+    {% endif %}
+  {% endif %}
+{% endfor %}
+{# Allow custom FPM / CGI / application service units and config tests.
+   Values replace defaults; a test must be a nonempty argv list. #}
+{% do services.update(cfg.get('services', {})) %}
+{% endif %}
+{% for service, argv in services.items() %}
+  {% if argv is string or argv is mapping or argv is not sequence or not argv %}
+    {% do errors.append(service ~ ': config test must be a nonempty argv list.') %}
+  {% endif %}
+{% endfor %}
+{% set php_inventory = inventory | selectattr('component', 'equalto', 'php') | list %}
+{% import 'php2shell/php2shell_upload_progress.jinja' as upload_policy with context %}
+{% set mitigation = upload_policy %}
+
+{# Shared Linux/Windows config-test, restart and status states. Preserve state
+   IDs so existing requisites and output consumers continue to work. #}
+{% macro service_states(package_requisites, prefix='php2shell', force=false) %}
+{% for service, argv in services | dictsort %}
+{% if salt['service.status'](service) %}
+{% set number = loop.index %}
+{% set watched = [{'pkg': 'php2shell_fixed_packages'}] if not is_windows and service.endswith('-fpm') and {'pkg': 'php2shell_fixed_packages'} in package_requisites else package_requisites %}
+{% set watched = watched + mitigation.file_requisites %}
+{% set check = prefix ~ '_configtest_' ~ number %}
+{% set restart = prefix ~ '_restart_' ~ number %}
+{{ check }}:
+  module.run:
+    - cmd.run_all:
+      - cmd: {{ argv | tojson }}
+      - python_shell: false
+    - require: {{ (watched + [{'test': 'php2shell_upload_progress'}]) | tojson }}
+
+{{ restart }}:
+{% if force %}
+  module.run:
+    - service.restart:
+      - name: {{ service | tojson }}
+{% else %}
+  service.running:
+    - name: {{ service | tojson }}
+    - watch: {{ watched | tojson }}
+{% endif %}
+    - require: {{ (watched + [{'module': check}]) | tojson }}
+
+{{ prefix }}_running_{{ number }}:
+  module.run:
+    - service.status:
+      - name: {{ service | tojson }}
+    - require:
+      - {{ 'module' if force else 'service' }}: {{ restart }}
+{% endif %}
+{% endfor %}
+{% endmacro %}

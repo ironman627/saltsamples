@@ -1,0 +1,70 @@
+{# CVE-2026-115560: no fixed release published in the Oct 23 advisory.
+   Static php.ini assessment is conditional on operator-confirmed coverage;
+   it cannot determine runtime ini_set() behavior or prove worker replacement. #}
+{% set policy = cfg.get('upload_progress', {}) %}
+{% set not_applicable = policy.get('application_not_affected', false) %}
+{% set problems = [] %}
+{% set files = [] %}
+{% set pending = [] %}
+{% set file_requisites = [] %}
+{% set seen_paths = [] %}
+{% set candidates = policy.get('ini_files', []) %}
+{% if php_inventory and not not_applicable %}
+  {% if not policy.get('configuration_complete', false) %}
+    {% do problems.append('CVE-2026-115560: confirm all web-runtime php.ini files and absence of enabling overrides with upload_progress:configuration_complete.') %}
+  {% endif %}
+  {% if candidates is string or candidates is mapping or candidates is not sequence or not candidates %}
+    {% do problems.append('CVE-2026-115560: supply upload_progress:ini_files as a nonempty list of existing effective php.ini paths.') %}
+  {% else %}
+    {# Salt overrides Jinja's unique filter and accepts no case_sensitive
+       argument. Keep Linux paths distinct; deduplicate Windows paths by case. #}
+    {% for path in candidates %}
+      {% set key = path | lower if is_windows and path is string else path %}
+      {% if key not in seen_paths %}
+      {% do seen_paths.append(key) %}
+      {% if path is not string or not salt['file.file_exists'](path) %}
+        {% do problems.append('CVE-2026-115560: php.ini file missing or invalid: ' ~ path) %}
+      {% elif not path.lower().endswith('.ini') or path.lower().endswith('.user.ini') %}
+        {% do problems.append('CVE-2026-115560: use startup PHP INI files, not .user.ini or Apache/FPM configuration syntax: ' ~ path) %}
+      {% else %}
+        {% do files.append(path) %}
+        {% set contents = salt['file.read'](path) %}
+        {% set assignments = '(?im)^[ \t]*session[.]upload_progress[.]enabled[ \t]*=' %}
+        {% set disabled = '[ \t]*(?:0|off|false|no)[ \t]*(?:;[^\r\n]*)?\r?$' %}
+        {% if (contents | regex_search(assignments ~ disabled)) is none or (contents | regex_search(assignments ~ '(?!' ~ disabled ~ ')[^\r\n]*')) is not none %}
+          {% do pending.append(path) %}
+        {% endif %}
+      {% endif %}
+      {% endif %}
+    {% endfor %}
+  {% endif %}
+  {% if pending and not services and not (is_windows and cfg.get('windows', {}).get('iis_apppools', [])) %}
+    {% do problems.append('CVE-2026-115560: configure the web service/config test or Windows IIS pools so changed settings replace the affected workers.') %}
+  {% endif %}
+{% endif %}
+{% if not problems and not not_applicable and php_inventory %}
+  {% for path in files %}{% do file_requisites.append({'file': 'php2shell_upload_progress_' ~ loop.index}) %}{% endfor %}
+{% endif %}
+
+{% macro states(prerequisites) %}
+{% if problems %}
+php2shell_upload_progress:
+  test.fail_without_changes:
+    - name: {{ problems | join(' ') | tojson }}
+{% else %}
+{% for path in files if not not_applicable %}
+php2shell_upload_progress_{{ loop.index }}:
+  file.replace:
+    - name: {{ path | tojson }}
+    - pattern: '(?im)^[ \t]*session[.]upload_progress[.]enabled[ \t]*=[^\r\n]*'
+    - repl: 'session.upload_progress.enabled = 0'
+    - append_if_not_found: true
+    - backup: '.php2shell.bak'
+    - require: {{ prerequisites | tojson }}
+{% endfor %}
+php2shell_upload_progress:
+  test.nop:
+    - name: {{ ('CVE-2026-115560: application owner reviewed this vector as not applicable.' if not_applicable else ('CVE-2026-115560: upload progress disabled in the declared php.ini scope; verify worker replacement.' if php_inventory else 'No PHP runtime detected in the checked scope.')) | tojson }}
+    - require: {{ file_requisites | tojson }}
+{% endif %}
+{% endmacro %}

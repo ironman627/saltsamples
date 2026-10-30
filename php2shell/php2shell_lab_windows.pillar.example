@@ -1,0 +1,45 @@
+# WINDOWS LAB ONLY. Load this instead of the Ubuntu lab example, not alongside it.
+# Uses the definitions and installer wrappers shipped in the winrepo/ directory.
+# Deploy them to the master before running the lab state; see winrepo/README.md.
+# PHP TS/NTS, architecture and Apache module ABI must match your chosen handler.
+php2shell:
+  lab:
+    enabled: true
+    install_latest: true
+    # Defaults to the PHP/Apache packages mapped under windows:packages below.
+    # For additional dependencies, explicitly list all required Winrepo names:
+    # packages: ['php83', 'apache24']
+    # Defaults to windows:target_versions below; lab pins override those targets.
+    # Optional pins for a package-patching demo; both old and fixed installers
+    # must exist in Winrepo. Any pins select pkg.installed for the whole group.
+    package_versions: {}
+    # Add a separately verified older package definition before pinning an old build.
+    start_services: true
+    # Defaults to the service names in windows:services below.
+    # services: ['SaltPHP2ShellApache']
+    exercise_mitigation: true
+
+  upload_progress:
+    # Must be the startup INI actually loaded by the lab web runtime.
+    ini_files: ['C:\SaltLabs\PHP83\php.ini']
+    # Confirm all effective startup configuration and absence of enabling overrides.
+    configuration_complete: true
+    application_not_affected: false
+
+  windows:
+    packages:
+      php83: php
+      apache24: apache
+    # Lab installation and remediation use these explicit targets.
+    # PHP 8.3.36.1 represents upstream Windows build 8.3.36-1 (engine 8.3.36).
+    # Keep the PHP package on the configured branch and at/above its security floor.
+    target_versions:
+      php83: '8.3.36.1'
+      apache24: '2.4.69'
+    services:
+      SaltPHP2ShellApache: ['C:\SaltLabs\Apache24\bin\httpd.exe', '-t']
+    runtime_packages:
+      'C:\SaltLabs\PHP83\php.exe': php83
+      'C:\SaltLabs\PHP83\php-cgi.exe': php83
+      'C:\SaltLabs\PHP83\php8apache2_4.dll': php83
+      'C:\SaltLabs\Apache24\bin\httpd.exe': apache24

@@ -1,0 +1,115 @@
+# Merge into pillar for the appropriate minions, not the Salt state tree.
+# PHP defaults require repositories offering the upstream fixed versions.
+# Apache defaults to repository updates only, without a CVE compliance claim.
+php2shell:
+  # Recognize verified Ubuntu USN-8948-1 backports for matching release/build
+  # families. Explicit minimum_versions below always take precedence.
+  use_vendor_baselines: true
+  # CVE-2026-115560 (Oct 23): an additional vector remains unpatched in the
+  # published advisory. Disable session upload progress in all effective PHP
+  # startup INI files, then replace workers. This can affect upload-progress UI.
+  upload_progress:
+    ini_files: []
+    # Linux examples: /etc/php.ini, /etc/php/8.3/fpm/php.ini,
+    # /etc/php/8.3/apache2/php.ini. Windows example: 'D:\Apps\PHP83\php.ini'.
+    # Include relevant startup conf.d INI overrides too. Do not supply .user.ini,
+    # Apache configuration or FPM pool files here: their syntax/scope differs.
+    configuration_complete: false
+    # Set true only after confirming these files cover every web runtime and no
+    # pool/server/directory override re-enables upload progress. This is a scope
+    # assertion, not an automatic effective-configuration probe.
+    application_not_affected: false
+    # Alternative: true only after an application review establishes that it
+    # never switches session.serialize_handler as described in the advisory.
+    # CLI-only installations can use this after confirming no web-serving PHP.
+
+  # Per-package vendor-fixed minimums, including epoch and release. Optional
+  # for patching Apache to the latest repo packages, required to enforce an
+  # Apache security minimum during patching. Other PHP backports need verified
+  # overrides unless covered by the built-in Ubuntu release/build baselines.
+  # Replace these placeholders with actual advisory-confirmed package versions.
+  # Target pillar by OS release, repository/module stream AND PHP branch.
+  minimum_versions: {}
+  # minimum_versions:
+  #   php-common: 'FULL_VENDOR_FIXED_VERSION'
+  #   php-cli: 'FULL_VENDOR_FIXED_VERSION'
+  #   php-fpm: 'FULL_VENDOR_FIXED_VERSION'
+  #   httpd: 'FULL_VENDOR_FIXED_VERSION'
+  #   httpd-core: 'FULL_VENDOR_FIXED_VERSION'
+  #   httpd-tools: 'FULL_VENDOR_FIXED_VERSION'
+  #   mod_ssl: 'FULL_VENDOR_FIXED_VERSION'
+
+  # Optional repository selection. Use an APT release or YUM/DNF/Zypper repo
+  # identifier supported by your minion's pkg provider. Repos must already exist.
+  # fromrepo: approved-security
+
+  # Optional: additional installed packages, e.g. PHP extensions whose source
+  # packages must be kept in step with the runtime. They use the same baseline
+  # logic; independently versioned extensions need their own minimum_versions.
+  extra_php_packages: []
+  extra_apache_packages: []
+
+  # Optional custom running units => config-test argv lists.
+  # Overrides default tests for matching units. Only running units are managed.
+  services: {}
+  # services:
+  #   php82-php-fpm: ['/opt/remi/php82/root/usr/sbin/php-fpm', '-t']
+  #   my-php-cgi: ['/usr/local/bin/check-my-php-config']
+
+  # Use true after a partial/interrupted patch run or if workers need restarting
+  # even though installed packages already meet the baseline. Otherwise restart
+  # only when this run changes packages. Config tests run before either mode.
+  force_restart: false
+
+  # WINDOWS ONLY. Target this section to Windows minions. Package names below
+  # are EXAMPLES of your own Winrepo definitions, not built-in packages.
+  windows:
+    # Winrepo package short names => runtime component. Actual installed package
+    # names are visible with pkg.list_pkgs. Every runtime owner needs a role.
+    packages: {}
+    # packages:
+    #   company-php83: php
+    #   company-apache24: apache
+
+    # Exact approved versions that exist in your Winrepo definitions. Winrepo
+    # does not accept the Linux >= expressions. Never use 'latest' here.
+    target_versions: {}
+    # target_versions:
+    #   company-php83: '8.3.36'
+    #   company-apache24: '2.4.69'
+
+    # Additional executable/DLL paths, especially nonstandard drives/locations.
+    # Defaults also inspect PATH, common locations, runtime processes, Windows
+    # service command lines and IIS applicationHost.config.
+    runtime_paths: []
+    # runtime_paths:
+    #   - 'D:\Apps\PHP83\php-cgi.exe'
+    #   - 'D:\Apps\Apache24\bin\httpd.exe'
+    #   - 'D:\Apps\PHP83\php8apache2_4.dll'
+
+    # Optional nondefault Apache config file => ServerRoot. The scanner also
+    # checks *.conf beneath discovered Apache roots for PHP LoadModule lines.
+    # Cross-file Define values/conditional Includes may require runtime_paths.
+    apache_configs: {}
+    # apache_configs:
+    #   'D:\WebConfig\httpd.conf': 'D:\Apps\Apache24'
+
+    # Each discovered binary must map to an INSTALLED Winrepo package before
+    # patching. Use the path emitted by the scan; matching ignores letter case.
+    runtime_packages: {}
+    # runtime_packages:
+    #   'D:\Apps\PHP83\php-cgi.exe': company-php83
+    #   'D:\Apps\PHP83\php.exe': company-php83
+    #   'D:\Apps\Apache24\bin\httpd.exe': company-apache24
+
+    # Choose the services and/or IIS pools that actually host this runtime.
+    # Windows Apache uses httpd.exe -t, not apachectl. Stopped units stay stopped.
+    services: {}
+    # services:
+    #   Apache2.4: ['D:\Apps\Apache24\bin\httpd.exe', '-t']
+    iis_apppools: []
+    # iis_apppools:
+    #   - PHP-Site-Pool
+
+    # Set true only if these installations are CLI-only and have no web workers.
+    no_web_workers: false

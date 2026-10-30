@@ -1,0 +1,62 @@
+# Apply only to a disposable, isolated lab minion. Merge with your existing
+# php2shell settings. The active paths below demonstrate Ubuntu PHP 8.3.
+# This file is PILLAR DATA, not a state to execute.
+php2shell:
+  lab:
+    enabled: true
+    # Update to the latest package candidate in configured repos (Winrepo on Windows).
+    # This does not add repos or switch PHP module streams. Any exact version
+    # entries below take precedence and select pkg.installed instead.
+    install_latest: true
+    start_services: true
+    # Debian/Ubuntu only: choose a branch available in the configured repos.
+    php_branch: '8.3'
+
+    # By default install the platform's Apache + PHP/FPM packages. Override
+    # names/services for alternate streams, custom packages, or Windows.
+    # packages: ['httpd', 'php', 'php-cli', 'php-common', 'php-fpm']
+    # services: ['php-fpm', 'httpd']
+
+    # Optional exact full package versions for an earlier-CVE patch exercise.
+    # Stage the old AND fixed builds in your approved lab repository first.
+    # Use a clean VM/snapshot: exact pins can downgrade installed packages.
+    package_versions: {}
+    # package_versions:
+    #   php: 'EXACT_REPOSITORY_VERSION'
+    #   php-cli: 'EXACT_REPOSITORY_VERSION'
+    #   php-common: 'EXACT_REPOSITORY_VERSION'
+    #   php-fpm: 'EXACT_REPOSITORY_VERSION'
+
+    # Explicitly reset upload progress to ON to exercise NEEDS MITIGATION ->
+    # MITIGATED. This does not build the application code needed for the RCE.
+    exercise_mitigation: true
+
+  # Ubuntu PHP 8.3 FPM example. Confirm scope and overrides for your deployment.
+  # Rocky/RHEL example: /etc/php.ini
+  # Windows example: 'D:\Apps\PHP83\php.ini'
+  upload_progress:
+    ini_files: ['/etc/php/8.3/fpm/php.ini']
+    configuration_complete: true
+    application_not_affected: false
+
+  # WINDOWS: prefer php2shell_lab_windows.pillar.example, which includes the
+  # Windows INI scope and defaults to the latest available Winrepo packages.
+  # Alternatively replace the lab section above with your actual Winrepo package
+  # names and exact versions, and merge matching remediation configuration:
+  # lab:
+  #   enabled: true
+  #   packages: ['company-php83', 'company-apache24']
+  #   package_versions: {company-php83: '8.3.35', company-apache24: '2.4.69'}
+  #   services: ['Apache2.4']
+  #   start_services: true
+  #   exercise_mitigation: true
+  # windows:
+  #   packages: {company-php83: php, company-apache24: apache}
+  #   target_versions: {company-php83: '8.3.36', company-apache24: '2.4.69'}
+  #   services:
+  #     Apache2.4: ['D:\Apps\Apache24\bin\httpd.exe', '-t']
+  #   runtime_packages:
+  #     'D:\Apps\PHP83\php.exe': company-php83
+  #     'D:\Apps\PHP83\php-cgi.exe': company-php83
+  #     'D:\Apps\PHP83\php8apache2_4.dll': company-php83
+  #     'D:\Apps\Apache24\bin\httpd.exe': company-apache24
